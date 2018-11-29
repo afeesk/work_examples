@@ -1,0 +1,372 @@
+---
+title: "BBC document classification"
+output: html_notebook
+---
+
+This paper show case a document classification task using [news article dataset](http://mlg.ucd.ie/datasets/bbc.html), originating from BBC news. The datase is provided by D. Greene and P. Cunningham. "Practical Solutions to the Problem of Diagonal Dominance in Kernel Document Clustering", Proc. ICML 2006. [PDF](http://mlg.ucd.ie/files/publications/greene06icml.pdf). 
+
+It Consists of 2225 documents from the BBC news website corresponding to stories in five topical areas from 2004-2005. With Class Labels: 5 (business, entertainment, politics, sport, tech)'
+These datasets are made available for non-commercial and research purposes only, and all data is provided in pre-processed matrix format.
+
+### File formats
+
+The datasets have been pre-processed as follows: stemming (Porter algorithm), stop-word removal (stop word list) and low term frequency filtering (count < 3) have already been applied to the data. The files contained in the archives given above have the following formats:
+
++ .mtx: Original term frequencies stored in a sparse data matrix in Matrix Market format.
+
++ .terms: List of content-bearing terms in the corpus, with each line corresponding to a row of the sparse data matrix.
+
++ .docs: List of document identifiers, with each line corresponding to a column of the sparse data matrix.
+
++ .classes: Assignment of documents to natural classes, with each line corresponding to a document.
+
++ .urls: Links to original articles, where appropriate.
+
+###Data Preparation
+This work is done in R
+
+```{r}
+#Load required libraries
+library(tidyverse)
+library(tm)
+library(FCNN4R)
+library(tidyverse)
+library(C50)
+library(nnet)
+library(klaR)
+library(caret)
+library(caretEnsemble)
+library(e1071)
+library(kernlab)
+library(RWeka)
+library(MASS)
+library(gbm)
+library(ipred)
+```
+
+
+```{r}
+##Download bbc.zip file
+link = "http://mlg.ucd.ie/files/datasets/bbc.zip"
+download.file(link, destfile = "bbc.zip", method = "libcurl")
+
+```
+
+```{r}
+#Unzip to see contents
+unzip("bbc.zip", list = TRUE)
+#open folder to read files
+unzip("bbc.zip", files = "bbc.mtx")
+unzip("bbc.zip", files = "bbc.docs")
+unzip("bbc.zip", files = "bbc.terms")
+
+```
+```{r}
+bbc_matrix <- Matrix::readMM("bbc.mtx") #read file in market matrix format
+
+#inspect first 10 row and 10 columns
+bbc_matrix[1:10, 1:10]
+
+#check the dimensions
+dim(bbc_matrix)
+
+```
+We have 2225 documents with 9635 terms
+
+
+####Next we'll leverage the Terrm frequency inverse document frequency from the tm package to normalise the sparce matrix
+```{r}
+#TfIdf
+bbc_tdm <- tm::as.TermDocumentMatrix(bbc_matrix, weightTfIdf)
+
+#check dimensions
+dim(bbc_tdm)
+
+```
+```{r}
+#Let's explore the TermDocumentMatrix
+#The list
+ls(bbc_tdm)
+#we have Terms and Docs in the dimnames
+ls(bbc_tdm$dimnames)
+
+#empty terms and docs
+bbc_tdm$dimnames$Terms
+bbc_tdm$dimnames$Docs
+
+```
+```{r}
+#Let's read in the tems and docs from our already opened zip file
+bbc_terms <- scan("bbc.terms", what = "character")
+bbc_docs <- scan("bbc.docs", what = "character")
+
+#add the above terms and docs to the bbc_tdm
+bbc_tdm$dimnames$Terms <- bbc_terms
+bbc_tdm$dimnames$Docs <- bbc_docs
+
+```
+```{r}
+#check result
+length(bbc_tdm$dimnames$Terms)
+length(bbc_tdm$dimnames$Docs)
+head(bbc_tdm$dimnames$Terms)
+head(bbc_tdm$dimnames$Docs)
+
+```
+
+We now have the terms and docs
+
+####Next, we'll convert the TermDocumentMatrix to DocumentTermMatrix
+```{r}
+# transpose TermDocumentMatrix to DocumentTermMatrix
+bbc_dtm <- tm::as.DocumentTermMatrix(bbc_tdm)
+
+```
+
+```{r}
+#inspect result
+bbc_dtm
+head(bbc_dtm$dimnames$Terms)
+head(bbc_dtm$dimnames$Docs)
+dim(bbc_dtm)
+
+```
+```{r}
+#inspect some of the column names
+colnames(bbc_dtm)[1:10]
+
+```
+
+```{r}
+#convert to matrix and later to dataframe: data frame will be usefule for our model building
+bbc_news <- as.matrix(bbc_dtm)
+
+#To data frame
+bbc_news <- as.data.frame(bbc_news)
+dim(bbc_news)
+bbc_news[1:10, 1:5]
+colnames(bbc_news)[1:10]
+rownames(bbc_news)[1:10]
+```
+
+
+```{r}
+#use row names to create labels or classes
+class_label <- rownames(bbc_news)
+#check first 10 classes
+class_label[1:10]
+```
+
+I have carefully given the class a complex (class_label), this is to avoid colum names duplication.
+```{r}
+#Remove the last 4 letters in each class_label
+class_label <- sapply(class_label, function(x) substr(x, 1, nchar(x) - 4))
+class_label <- as.factor(class_label)
+summary(class_label)
+```
+
+We have 510 business, 386 entertainment, 417 politics, 511 sport, and 401 tech documents. This is well balanced classes, therefore we need not to worry about class imbalance.
+
+####Next, we'll bind the label to the document and replace the row names with sequence/numbers.
+```{r}
+#bind class_label label and bbc_news together
+bbc_news <- cbind(class_label, bbc_news)
+#check
+bbc_news[1:10, 1:5]
+```
+
+The class label was put added to the first column on purpose
+```{r}
+#replace the original row name with number
+rownames(bbc_news) <- 1:(nrow(bbc_news))
+```
+
+```{r}
+#check
+bbc_news[1:10, 1:5]
+dim(bbc_news)
+```
+
+As expected, the row names are now numbers.
+
+####Next let's check if we have any duplication in column names
+```{r}
+anyDuplicated(colnames(bbc_news))
+```
+
+####Let's draw a pairwise scatter plot to see how the first 5 columns are clustered
+```{r}
+#column names 
+colnames((bbc_news)[2:6])
+#Pairwise correlation plot
+pairs(bbc_news[, 2:6], gap = 0, pch = 19, cex = 0.4, col = bbc_news[, 1])
+```
+
+The first five variables doesn't seem to cluster well around the class labels. This will be least of worries for now since we have thousands of variables yet unexplored.
+
+##Machine learning and Model Evaluation
+###SPLIT DATASET TO TRAINING AND TEST SET
+####Here we'll leverage the createDataPartition from caret package.
+```{r}
+#set seed for reproduceability 
+set.seed(3211)
+# define an 75%/25% train/test split of the dataset
+split=0.75
+trainIndex <- createDataPartition(bbc_news$class_label, p=split, list=FALSE)
+data_train <- bbc_news[ trainIndex,]
+data_test <- bbc_news[-trainIndex,]
+
+dim(data_train) 
+dim(data_test)
+
+```
+
+We have 1671 training sets and 554 test sets.
+
+####Let's see how the classes are distributed
+```{r}
+summary(data_train$class_label)
+summary(data_test$class_label)
+```
+We can see that the class is reasonable distributed both in training set and test set. 
+
+####The next stage is to build our classifier. 
+I have proposed the following algorithms:
+1. knn (usually the de-facto algorithm to fit to benchmark accuracy of classification to other complex algorithms)
+
+2. svm (very handy when we have very small data points with many features)
+
+3. Stochastic gradient for boosting
+
+Finally, only 10 fold cross validation was considered for fast model building
+
+To build the model we'll employ the power of the caret package in r which is very handy for tuning, resampling, bootstrapping, bagging, stacking and so on.
+
+####Let's get started
+
+###K Nearest Neighbour (knn)
+```{r}
+#Set control parameters for k fold cross validation, this will be used by all other algorithms
+control <- trainControl(method="cv", number=10)
+```
+
+```{r}
+#Fit knn model
+model_knn <- train(data_train[, -1], data_train$class_label, trControl=control, method = 'knn')
+```
+
+####Let's print our model to see how it performed on the validation set
+```{r}
+model_knn
+```
+
+This model select the optimal model using the highest accuracy. The model accuracy selected is 70.45%. This could be improved by using other resampling methods such as repeatedcv, LOOCV and more.
+
+###MODEL EVALUATION
+####Let's now evaluated our model on the unseen test set
+```{r}
+predict_knn <- predict(model_knn, newdata = data_test)
+```
+####Let's print our model to see how it performed on the test set
+```{r}
+confusionMatrix(predict_knn, data_test$class_label)
+```
+The model is able to accurately classify all the sport class. It performed very well in classifying business and entertainment class but performed poorly in classifying politics, and tech class. This behavior also reflect in the sensitivity and specificity. Meanwhile, it performed better on the unseen test set compared to its performance on the validation set. The model proposed a 95% confidence that the accuracy of the prediction will be between 76% and 82.88%.
+Since accuracy is not the best method to evaluate model performace, we will use a more prefered model evaluation metric called AUC (Area Under the ROC Curve). 
+
+We'll make use of the pROC library since it is very handy for multiclass model.
+
+####Let's quickly load the library and calculate the AUC
+```{r}
+library(pROC)
+ROC_knn <- multiclass.roc(as.numeric(predict_knn), as.numeric(data_test$class_label), percent = TRUE)
+
+ls(ROC_knn)
+
+```
+
+We can see the list of values binded to the multiclass.roc fuction, but we are interested in the "auc" metric, and since we specify percent = TRUE, we'll get the result in percentage.
+```{r}
+ROC_knn$auc
+```
+We can see that the AUC is 88.15% which indicates that we a good model. Meanwhile the model could be improved by using other cross validation method and possibly tunning parameter. One other important way to improve the model is to perform analysis using the raw text file to enable us extract more features like n-grams, word-to-vec and so on.
+
+####Next we'll fit a second model, svm using a non linear method.
+```{r}
+##Support vector machine 
+model_svm <- train(class_label~., data = data_train, trControl=control, method = 'svmRadial')
+```
+####Let's print our model to see how it performed on the validation set
+```{r}
+model_svm
+```
+This model select the optimal model using the highest accuracy. This is a huge improvement compare to the result of knn. The model accuracy selected is 97.37%. This could be improved by using other resampling methods. 
+
+###MODEL EVALUATION
+####Let's now evaluated our model on the unseen test set
+```{r}
+predict_svm <- predict(model_svm, newdata = data_test)
+```
+####Let's print our model to see how it performed on the test set
+```{r}
+confusionMatrix(predict_svm, data_test$class_label)
+```
+Like the knn model, this model is able to accurately classify all the sport class. It also did a good job in classifying other classes. This behavior also reflect in the sensitivity and specificity. However, its performance has droped on the unseen test set compared to its performance on the validation set. The model proposed a 95% confidence that the accuracy of the prediction will be between 95.13% and 98.20%.
+
+
+####Let's calculate the AUC
+```{r}
+ROC_svm <- multiclass.roc(as.numeric(predict_svm), as.numeric(data_test$class_label), percent = TRUE)
+```
+
+```{r}
+ROC_svm$auc
+```
+We can see that the AUC is 96.6% which indicates that we an excellent model. It is also possible to improve the performance as explained under knn.
+
+##Boosting Algorithms
+
+###1. Stochastic Gradient Boosting
+####Model Fiiting
+```{r}
+model_gbm <- train(data_train[, -1], data_train$class_label, trControl=control, method = 'gbm')
+```
+####Let's print our model to see how it performed on the validation set
+```{r}
+model_gbm
+```
+This model select the optimal model using the highest accuracy. Although, the accuracy is lower than svm.  The model accuracy selected is 96.59%. This could be improved by using other resampling methods.
+
+###MODEL EVALUATION
+
+####Let's now evaluated our model on the unseen test set
+```{r}
+predict_gbm <- predict(model_gbm, newdata = data_test)
+```
+
+```{r}
+confusionMatrix(predict_gbm, data_test$class_label)
+```
+Like the knn and svm model, this model is able to accurately classify all the sport class. It also did a good job in classifying other classes. This behavior also reflect in the sensitivity and specificity. However, its performance has slightly droped on the unseen test set compared to its performance on the validation set. The model proposed a 95% confidence that the accuracy of the prediction will be between 94.05% and 97.49%.
+
+
+####Let's calculate the AUC
+```{r}
+ROC_gbm <- multiclass.roc(as.numeric(predict_gbm), as.numeric(data_test$class_label), percent = TRUE)
+```
+
+```{r}
+ROC_gbm$auc
+```
+We can see that the AUC is 95.22% which indicates that we an excellent model. Although, it is lower than the svm model.
+
+##SUMMARY
+It is amazing to see how simple algorithm like svm can be more accurate than a boosting algorithm like stochastic gradient. This definately happen sometimes. Although both algorithms appear to fit excellent model for our classification task, while knn fit a good model, there is a high possibility that we can improve the predicting power of these alsogrithms. 
+
+In the future, we would work with the raw text file to extract more features so our algorithms can learn better. Also, we would leverage ensemble to improve the predictive power of the classifier.
+
+
+
+
+
+
