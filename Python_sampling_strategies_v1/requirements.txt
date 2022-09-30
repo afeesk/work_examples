@@ -1,5 +1,5 @@
 imbalanced-learn==0.7.0
-joblib==0.16.0
+joblib==1.2.0
 numpy==1.19.1
 pandas==1.1.1
 python-dateutil==2.8.1
